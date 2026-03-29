@@ -8,16 +8,15 @@ from ortools.constraint_solver import pywrapcp
 from geopy.geocoders import Nominatim
 import joblib
 import time
+import matplotlib.pyplot as plt
 from math import radians, sin, cos, sqrt, atan2
 
 st.set_page_config(page_title="AI Route Optimization System", layout="wide")
-
 st.title("🚚 AI Route Optimization System")
 
 # -----------------------------
-# GEOCODER (FIX 1: CACHING)
+# GEOCODER
 # -----------------------------
-
 geolocator = Nominatim(user_agent="route_optimizer")
 
 @st.cache_data
@@ -31,32 +30,26 @@ def get_coordinates(city):
         return None, None
 
 # -----------------------------
-# LOAD ETA MODEL
+# LOAD MODEL
 # -----------------------------
-
 try:
     model = joblib.load("eta_model.pkl")
 except:
-    st.warning("ETA model not found. Please run train_model.py first.")
     model = None
+    st.warning("ETA model not found.")
 
 # -----------------------------
 # SESSION STATE
 # -----------------------------
-
 if "locations" not in st.session_state:
     st.session_state.locations = []
 
 # -----------------------------
 # CSV UPLOAD
 # -----------------------------
+st.subheader("Upload Dataset")
 
-st.subheader("Upload Logistics Dataset")
-
-uploaded_file = st.file_uploader(
-    "Upload indian_logistics_city_dataset.csv",
-    type=["csv"]
-)
+uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
 
 if uploaded_file is not None:
     df_csv = pd.read_csv(uploaded_file)
@@ -64,10 +57,9 @@ if uploaded_file is not None:
     st.success("Dataset uploaded successfully!")
 
 # -----------------------------
-# MANUAL ORDER INPUT
+# INPUT FORM
 # -----------------------------
-
-st.subheader("Add Full Delivery Order")
+st.subheader("Add Delivery Order")
 
 with st.form("order_form"):
 
@@ -77,26 +69,12 @@ with st.form("order_form"):
         order_id = st.number_input("Order ID", step=1)
         pickup_city = st.text_input("Pickup City")
         package_weight = st.number_input("Package Weight (kg)", min_value=0.1)
-
-        vehicle_type = st.selectbox(
-            "Vehicle Type",
-            ["Bike", "Van", "Truck"]
-        )
+        vehicle_type = st.selectbox("Vehicle Type", ["Bike", "Van", "Truck"])
 
     with col2:
         delivery_city = st.text_input("Delivery City")
-
-        traffic_level = st.selectbox(
-            "Traffic Level",
-            ["Low", "Medium", "High"]
-        )
-
-        delivery_priority = st.selectbox(
-            "Delivery Priority",
-            ["Low", "Medium", "High"]
-        )
-
-    st.markdown("### Optional Business Inputs")
+        traffic_level = st.selectbox("Traffic Level", ["Low", "Medium", "High"])
+        delivery_priority = st.selectbox("Delivery Priority", ["Low", "Medium", "High"])
 
     col3, col4 = st.columns(2)
 
@@ -109,9 +87,7 @@ with st.form("order_form"):
     submit = st.form_submit_button("Add Order")
 
     if submit:
-
         if pickup_city and delivery_city:
-
             profit = delivery_revenue - delivery_cost
 
             st.session_state.locations.append({
@@ -127,81 +103,55 @@ with st.form("order_form"):
                 "profit_per_delivery": profit
             })
 
-            st.success("✅ Full order added successfully!")
-
+            st.success("Order added successfully!")
         else:
-            st.error("❌ Please enter both pickup and delivery cities.")
+            st.error("Enter both cities")
 
 # -----------------------------
-# PROCESS DATA
+# MAIN LOGIC
 # -----------------------------
-
 if len(st.session_state.locations) > 0:
 
     df = pd.DataFrame(st.session_state.locations)
-
     st.subheader("Current Orders")
     st.dataframe(df)
 
     # -----------------------------
-    # GET COORDINATES
+    # GEOCODING
     # -----------------------------
-
-    st.subheader("Fetching Coordinates (Geocoding...)")
-
     city_coords = {}
-
     cities = list(set(df["pickup_city"]).union(set(df["delivery_city"])))
 
     progress = st.progress(0)
 
     for i, city in enumerate(cities):
-
         lat, lon = get_coordinates(city)
         city_coords[city] = (lat, lon)
-
-        time.sleep(1)  # FIX 2: delay to avoid API blocking
-
+        time.sleep(1)
         progress.progress((i + 1) / len(cities))
 
-    # -----------------------------
-    # FILTER VALID CITIES
-    # -----------------------------
+    valid_cities = [c for c in cities if city_coords[c][0] is not None]
 
-    valid_cities = []
-
-    for c in cities:
-        if city_coords[c][0] is not None:
-            valid_cities.append(c)
-
-    # FIX 3: prevent crash
     if len(valid_cities) < 2:
-        st.error("❌ Need at least 2 valid cities for route optimization.")
+        st.error("Need at least 2 valid cities")
         st.stop()
 
     coords = [city_coords[c] for c in valid_cities]
 
     # -----------------------------
-    # HAVERSINE FUNCTION
+    # HAVERSINE
     # -----------------------------
-
     def haversine(lat1, lon1, lat2, lon2):
-
         R = 6371
-
         dlat = radians(lat2 - lat1)
         dlon = radians(lon2 - lon1)
-
         a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
-
         c = 2*atan2(sqrt(a), sqrt(1-a))
-
         return R*c
 
     # -----------------------------
     # DISTANCE MATRIX
     # -----------------------------
-
     size = len(coords)
     matrix = np.zeros((size, size))
 
@@ -216,192 +166,116 @@ if len(st.session_state.locations) > 0:
     # -----------------------------
     # ROUTE OPTIMIZATION
     # -----------------------------
+    manager = pywrapcp.RoutingIndexManager(len(matrix), 1, 0)
+    routing = pywrapcp.RoutingModel(manager)
 
-    try:
+    def distance_callback(from_index, to_index):
+        return int(matrix[manager.IndexToNode(from_index)][manager.IndexToNode(to_index)] * 100)
 
-        manager = pywrapcp.RoutingIndexManager(len(matrix), 1, 0)
-        routing = pywrapcp.RoutingModel(manager)
+    transit_callback = routing.RegisterTransitCallback(distance_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback)
 
-        def distance_callback(from_index, to_index):
+    search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+    search_parameters.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
 
-            from_node = manager.IndexToNode(from_index)
-            to_node = manager.IndexToNode(to_index)
+    solution = routing.SolveWithParameters(search_parameters)
 
-            return int(matrix[from_node][to_node] * 100)
+    route = []
+    index = routing.Start(0)
 
-        transit_callback = routing.RegisterTransitCallback(distance_callback)
-        routing.SetArcCostEvaluatorOfAllVehicles(transit_callback)
-
-        search_parameters = pywrapcp.DefaultRoutingSearchParameters()
-        search_parameters.first_solution_strategy = (
-            routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-        )
-
-        solution = routing.SolveWithParameters(search_parameters)
-
-        if solution is None:
-            st.error("❌ Could not find an optimized route.")
-            st.stop()
-
-        route = []
-
-        index = routing.Start(0)
-
-        while not routing.IsEnd(index):
-            route.append(manager.IndexToNode(index))
-            index = solution.Value(routing.NextVar(index))
-
+    while not routing.IsEnd(index):
         route.append(manager.IndexToNode(index))
+        index = solution.Value(routing.NextVar(index))
 
-    except Exception as e:
-        st.error(f"Route optimization failed: {e}")
-        st.stop()
-
-    # -----------------------------
-    # SHOW ROUTE
-    # -----------------------------
-
-    st.subheader("Optimized Route")
+    route.append(manager.IndexToNode(index))
 
     route_cities = [valid_cities[i] for i in route if i < len(valid_cities)]
 
+    st.subheader("Optimized Route")
     st.success(" ➝ ".join(route_cities))
 
     # -----------------------------
     # MAP
     # -----------------------------
-
-    st.subheader("Route Map")
-
     m = folium.Map(location=coords[0], zoom_start=5)
 
     for city, (lat, lon) in city_coords.items():
-        if lat is not None:
+        if lat:
             folium.Marker([lat, lon], popup=city).add_to(m)
 
-    path = [city_coords[c] for c in route_cities if city_coords[c][0] is not None]
-
+    path = [city_coords[c] for c in route_cities if city_coords[c][0]]
     folium.PolyLine(path, color="blue", weight=4).add_to(m)
 
     st_folium(m, width=900)
 
-else:
-    st.info("Upload dataset or add delivery orders to start optimization.")
     # -----------------------------
-# INSIGHTS CALCULATION
-# -----------------------------
+    # INSIGHTS
+    # -----------------------------
+    st.subheader("📊 Route Optimization Insights")
 
-st.subheader("📊 Route Optimization Insights")
+    fuel_efficiency = 15
+    fuel_price = 100
+    avg_speed = 40
 
-# Fuel efficiency assumption
-fuel_efficiency = 15  # km per liter
-fuel_price = 100  # ₹ per liter
-
-# Average speed assumption
-avg_speed = 40  # km/h
-
-# -----------------------------
-# NAIVE ROUTE DISTANCE
-# -----------------------------
-
-naive_distance = 0
-
-for i in range(len(coords) - 1):
-    naive_distance += haversine(
-        coords[i][0], coords[i][1],
-        coords[i+1][0], coords[i+1][1]
+    naive_distance = sum(
+        haversine(coords[i][0], coords[i][1], coords[i+1][0], coords[i+1][1])
+        for i in range(len(coords) - 1)
     )
 
-# -----------------------------
-# OPTIMIZED ROUTE DISTANCE
-# -----------------------------
+    optimized_distance = sum(
+        haversine(coords[route[i]][0], coords[route[i]][1],
+                  coords[route[i+1]][0], coords[route[i+1]][1])
+        for i in range(len(route) - 1)
+    )
 
-optimized_distance = 0
+    fuel_saved = (naive_distance - optimized_distance) / fuel_efficiency
+    time_saved = (naive_distance - optimized_distance) / avg_speed
+    profit_gain = fuel_saved * fuel_price
 
-for i in range(len(route) - 1):
-    a = coords[route[i]]
-    b = coords[route[i+1]]
+    # Percentage savings
+    distance_saving_pct = ((naive_distance - optimized_distance) / naive_distance) * 100
+    fuel_saving_pct = distance_saving_pct
+    time_saving_pct = distance_saving_pct
 
-    optimized_distance += haversine(a[0], a[1], b[0], b[1])
+    col1, col2, col3 = st.columns(3)
 
-# -----------------------------
-# FUEL CALCULATION
-# -----------------------------
+    col1.metric("⛽ Fuel Saved (L)", round(fuel_saved, 2), f"{round(fuel_saving_pct,1)}%")
+    col2.metric("⏱ Time Saved (hrs)", round(time_saved, 2), f"{round(time_saving_pct,1)}%")
+    col3.metric("💰 Profit Increase (₹)", round(profit_gain, 2))
 
-fuel_naive = naive_distance / fuel_efficiency
-fuel_optimized = optimized_distance / fuel_efficiency
+    # -----------------------------
+    # GRAPH
+    # -----------------------------
+    st.subheader("📊 Before vs After Comparison")
 
-fuel_saved = fuel_naive - fuel_optimized
+    metrics = ["Distance", "Fuel", "Time"]
 
-# -----------------------------
-# TIME CALCULATION
-# -----------------------------
+    naive_values = [
+        naive_distance,
+        naive_distance / fuel_efficiency,
+        naive_distance / avg_speed
+    ]
 
-time_naive = naive_distance / avg_speed
-time_optimized = optimized_distance / avg_speed
+    optimized_values = [
+        optimized_distance,
+        optimized_distance / fuel_efficiency,
+        optimized_distance / avg_speed
+    ]
 
-time_saved = time_naive - time_optimized
+    x = np.arange(len(metrics))
+    width = 0.35
 
-# -----------------------------
-# PROFIT CALCULATION
-# -----------------------------
+    fig, ax = plt.subplots()
 
-if "delivery_revenue" in df.columns and "delivery_cost" in df.columns:
+    ax.bar(x - width/2, naive_values, width, label="Before")
+    ax.bar(x + width/2, optimized_values, width, label="After")
 
-    total_revenue = df["delivery_revenue"].sum()
+    ax.set_xticks(x)
+    ax.set_xticklabels(metrics)
+    ax.set_title("Optimization Impact")
+    ax.legend()
 
-    cost_naive = fuel_naive * fuel_price
-    cost_optimized = fuel_optimized * fuel_price
-
-    profit_naive = total_revenue - cost_naive
-    profit_optimized = total_revenue - cost_optimized
-
-    profit_gain = profit_optimized - profit_naive
+    st.pyplot(fig)
 
 else:
-    profit_naive = profit_optimized = profit_gain = 0
-
-# -----------------------------
-# DISPLAY METRICS
-# -----------------------------
-
-col1, col2, col3 = st.columns(3)
-
-col1.metric(
-    "⛽ Fuel Saved (Liters)",
-    round(fuel_saved, 2)
-)
-
-col2.metric(
-    "⏱ Time Saved (Hours)",
-    round(time_saved, 2)
-)
-
-col3.metric(
-    "💰 Profit Increase (₹)",
-    round(profit_gain, 2)
-)
-
-# -----------------------------
-# EXTRA INSIGHTS
-# -----------------------------
-
-st.markdown("### Detailed Comparison")
-
-comparison_df = pd.DataFrame({
-    "Metric": ["Distance (km)", "Fuel Used (L)", "Time (hrs)", "Profit (₹)"],
-    "Naive Route": [
-        round(naive_distance,2),
-        round(fuel_naive,2),
-        round(time_naive,2),
-        round(profit_naive,2)
-    ],
-    "Optimized Route": [
-        round(optimized_distance,2),
-        round(fuel_optimized,2),
-        round(time_optimized,2),
-        round(profit_optimized,2)
-    ]
-})
-
-st.dataframe(comparison_df)
+    st.info("Upload dataset or add delivery orders to start optimization.")
