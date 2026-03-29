@@ -6,13 +6,43 @@ from streamlit_folium import st_folium
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 from geopy.geocoders import Nominatim
-import joblib
 import time
 import matplotlib.pyplot as plt
 from math import radians, sin, cos, sqrt, atan2
+from sklearn.linear_model import LinearRegression
 
 st.set_page_config(page_title="AI Route Optimization System", layout="wide")
 st.title("🚚 AI Route Optimization System")
+
+# -----------------------------
+# ETA MODEL (TRAIN INSIDE APP)
+# -----------------------------
+@st.cache_resource
+def train_eta_model():
+
+    np.random.seed(42)
+    data_size = 400
+
+    distance = np.random.uniform(1, 50, data_size)
+    traffic = np.random.choice([1, 2, 3], data_size)
+    vehicle = np.random.choice([1, 2, 3], data_size)
+    priority = np.random.choice([1, 2, 3], data_size)
+
+    eta = distance*1.8 + traffic*5 + priority*3 - vehicle*2
+
+    X = pd.DataFrame({
+        "distance": distance,
+        "traffic_level": traffic,
+        "vehicle_type": vehicle,
+        "priority": priority
+    })
+
+    model = LinearRegression()
+    model.fit(X, eta)
+
+    return model
+
+model = train_eta_model()
 
 # -----------------------------
 # GEOCODER
@@ -28,15 +58,6 @@ def get_coordinates(city):
         return None, None
     except:
         return None, None
-
-# -----------------------------
-# LOAD MODEL
-# -----------------------------
-try:
-    model = joblib.load("eta_model.pkl")
-except:
-    model = None
-    st.warning("ETA model not found.")
 
 # -----------------------------
 # SESSION STATE
@@ -232,15 +253,12 @@ if len(st.session_state.locations) > 0:
     time_saved = (naive_distance - optimized_distance) / avg_speed
     profit_gain = fuel_saved * fuel_price
 
-    # Percentage savings
     distance_saving_pct = ((naive_distance - optimized_distance) / naive_distance) * 100
-    fuel_saving_pct = distance_saving_pct
-    time_saving_pct = distance_saving_pct
 
     col1, col2, col3 = st.columns(3)
 
-    col1.metric("⛽ Fuel Saved (L)", round(fuel_saved, 2), f"{round(fuel_saving_pct,1)}%")
-    col2.metric("⏱ Time Saved (hrs)", round(time_saved, 2), f"{round(time_saving_pct,1)}%")
+    col1.metric("⛽ Fuel Saved (L)", round(fuel_saved, 2), f"{round(distance_saving_pct,1)}%")
+    col2.metric("⏱ Time Saved (hrs)", round(time_saved, 2), f"{round(distance_saving_pct,1)}%")
     col3.metric("💰 Profit Increase (₹)", round(profit_gain, 2))
 
     # -----------------------------
